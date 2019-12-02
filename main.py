@@ -21,14 +21,11 @@ ran = pd.DataFrame(np.random.uniform(0.55, 0.85, size=(len(df_train.index), len(
                    columns=df_train.columns, index=df_train.index)
 df_train = df_train.where(df_train != -1.0, ran)
 
-df_val = pd.read_csv('CheXpert-v1.0-small/valid.csv').fillna(0)  # [:500]
-# converting -1 to random interval
-ran = pd.DataFrame(np.random.uniform(0.55, 0.85, size=(len(df_val.index), len(df_val.columns))), columns=df_val.columns,
-                   index=df_val.index)
-df_val = df_val.where(df_val != -1.0, ran)
+# no post-processing necessary due to the intended lack of uncertainty labels / nans
+df_val = pd.read_csv('CheXpert-v1.0-small/valid.csv')  # [:500]
 
 
-def data_generators():
+def data_generators(batch_size, img_dim):
     img_data_gen = keras.preprocessing.image.ImageDataGenerator(  # rotation_range=7,
         width_shift_range=0.04,
         height_shift_range=0.04,
@@ -46,10 +43,10 @@ def data_generators():
                                                         'Atelectasis',
                                                         'Pneumothorax', 'Pleural Effusion', 'Pleural Other', 'Fracture',
                                                         'Support Devices'],
-                                                 target_size=(224, 224),
+                                                 target_size=img_dim,
                                                  color_mode='grayscale',
                                                  class_mode='raw',
-                                                 batch_size=64,
+                                                 batch_size=batch_size,
                                                  shuffle=True,
                                                  interpolation='box')
     val_gen = img_data_gen.flow_from_dataframe(df_val,
@@ -61,17 +58,17 @@ def data_generators():
                                                       'Atelectasis',
                                                       'Pneumothorax', 'Pleural Effusion', 'Pleural Other', 'Fracture',
                                                       'Support Devices'],
-                                               target_size=(224, 224),
+                                               target_size=img_dim,
                                                color_mode='grayscale',
                                                class_mode='raw',
-                                               batch_size=64,
+                                               batch_size=batch_size,
                                                shuffle=True,
                                                interpolation='box')
     return train_gen, val_gen
 
 
-def create_model():
-    backbone = keras.applications.nasnet.NASNetMobile(input_shape=(224, 224, 1), include_top=False, weights=None,
+def create_model(img_dim):
+    backbone = keras.applications.nasnet.NASNetMobile(input_shape=(*img_dim, 1), include_top=False, weights=None,
                                                       pooling=None)
     weights_path = keras.utils.get_file(
         'nasnet_mobile_no_top.h5',
@@ -83,14 +80,13 @@ def create_model():
 
 
 def classifier(model):
-    b1 = keras.layers.GlobalAveragePooling2D()(model.output)
-    b1 = keras.layers.Dense(14, activation='sigmoid')(b1)
-    b1 = keras.Model(model.input, b1)
-    b1.compile(keras.optimizers.SGD(lr=1e-3, momentum=0.9, nesterov=True), loss='binary_crossentropy', metrics=['acc'])
-    return b1
+    x = keras.layers.GlobalAveragePooling2D()(model.output)
+    x = keras.layers.Dense(14, activation='sigmoid')(x)
+    clsfr = keras.Model(model.input, x)
+    return clsfr
 
 
-def train(model):
+def train(model, epochs):
     filepath = "./output/model_" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".h5"
     checkpoint = keras.callbacks.ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=False,
                                                  mode='min')
@@ -99,7 +95,7 @@ def train(model):
 
     model.fit_generator(train_gen,
                         steps_per_epoch=len(train_gen),
-                        epochs=10,
+                        epochs=epochs,
                         # steps_per_epoch=15,
                         validation_data=val_gen,
                         validation_steps=len(val_gen),
@@ -107,10 +103,11 @@ def train(model):
                         callbacks=[tensorboard_callback, checkpoint])
 
 
-def main(tpu_training=False):
-  train_gen, val_gen = data_generators()
-  backbone_model = create_model()
-  model = classifier(backbone_model)
+def main(tpu_training=False, batch_size=64, img_dim=(224, 224), epochs=40):
+  # pre-instantiations
+  train_gen, val_gen = data_generators(batch_size, img_dim)
+  model = classifier(create_model(img_dim))
+  model.compile(keras.optimizers.SGD(lr=1e-3, momentum=0.9, nesterov=True), loss='binary_crossentropy', metrics=['acc', auc_roc])
 
   # ONLY REQUIRED for training with TPU
   if tpu_training:
@@ -119,7 +116,8 @@ def main(tpu_training=False):
         strategy=tf.contrib.tpu.TPUDistributionStrategy(
         tf.contrib.cluster_resolver.TPUClusterResolver(TPU_WORKER)))
   
-  train(model)
+  # training
+  train(model, epochs)
 
 
 if __name__ == '__main__':
