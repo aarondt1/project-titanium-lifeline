@@ -1,19 +1,26 @@
 import warnings
 import os
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+
 tf.get_logger().setLevel('INFO')
 import logging
+
 tf.get_logger().setLevel(logging.ERROR)
 import keras
 import keras_applications
-import matplotlib.pyplot as plt
-from datetime import datetime
 from metrics import auc_roc
+from keras import backend as K
 
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True
+config.gpu_options.per_process_gpu_memory_fraction = 0.95
+# config.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
+K.tensorflow_backend.set_session(tf.Session(config=config))
 
 df_train = pd.read_csv('CheXpert-v1.0-small/train.csv').fillna(0)  # [:500]
 # converting -1 to random interval
@@ -68,7 +75,7 @@ def data_generators(batch_size, img_dim):
 
 
 def create_model(img_dim):
-    backbone = keras.applications.nasnet.NASNetMobile(input_shape=(*img_dim, 1), include_top=False, weights=None,
+    backbone = keras.applications.nasnet.NASNetLarge(input_shape=(*img_dim, 1), include_top=False, weights=None,
                                                       pooling=None)
     weights_path = keras.utils.get_file(
         'nasnet_mobile_no_top.h5',
@@ -86,8 +93,8 @@ def classifier(model):
     return clsfr
 
 
-def train(model, epochs):
-    filepath = "./output/model_" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".h5"
+def train(model, epochs, train_gen, val_gen):
+    filepath = './output/model_durchlauf1_LARGE.{epoch:02d}-{val_loss:.2f}.h5'
     checkpoint = keras.callbacks.ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=False,
                                                  mode='min')
     logdir = "./logs/scalars/"  # /scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -96,28 +103,28 @@ def train(model, epochs):
     model.fit_generator(train_gen,
                         steps_per_epoch=len(train_gen),
                         epochs=epochs,
-                        # steps_per_epoch=15,
                         validation_data=val_gen,
                         validation_steps=len(val_gen),
                         initial_epoch=0,
                         callbacks=[tensorboard_callback, checkpoint])
 
 
-def main(tpu_training=False, batch_size=64, img_dim=(224, 224), epochs=40):
-  # pre-instantiations
-  train_gen, val_gen = data_generators(batch_size, img_dim)
-  model = classifier(create_model(img_dim))
-  model.compile(keras.optimizers.SGD(lr=1e-3, momentum=0.9, nesterov=True), loss='binary_crossentropy', metrics=['acc', auc_roc])
+def main(tpu_training=False, batch_size=16, img_dim=(331, 331), epochs=40):
+    # pre-instantiations
+    train_gen, val_gen = data_generators(batch_size, img_dim)
+    model = classifier(create_model(img_dim))
+    model.compile(keras.optimizers.SGD(lr=1e-3, momentum=0.9, nesterov=True), loss='binary_crossentropy',
+                  metrics=['acc', auc_roc])
 
-  # ONLY REQUIRED for training with TPU
-  if tpu_training:
-    model = tf.contrib.tpu.keras_to_tpu_model(
-        model,
-        strategy=tf.contrib.tpu.TPUDistributionStrategy(
-        tf.contrib.cluster_resolver.TPUClusterResolver(TPU_WORKER)))
-  
-  # training
-  train(model, epochs)
+    # ONLY REQUIRED for training with TPU
+    if tpu_training:
+        model = tf.contrib.tpu.keras_to_tpu_model(
+            model,
+            strategy=tf.contrib.tpu.TPUDistributionStrategy(
+                tf.contrib.cluster_resolver.TPUClusterResolver(TPU_WORKER)))
+
+    # training
+    train(model, epochs, train_gen, val_gen)
 
 
 if __name__ == '__main__':
