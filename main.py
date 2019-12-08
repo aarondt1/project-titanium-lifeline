@@ -18,8 +18,7 @@ from keras import backend as K
 from keras.models import load_model
 from keras_contrib.applications.nasnet import NASNetLarge
 
-
-MODEL_CHECKPOINT = "./output/model_durchlauf2_LARGE.02-0.44.h5"
+MODEL_CHECKPOINT = "./output/model_durchlauf2_LARGE.10-1.33.h5"
 
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
@@ -47,6 +46,7 @@ def data_generators(batch_size, img_dim):
         horizontal_flip=True,
         vertical_flip=False,
         rescale=1 / 255)
+
     # GENIUS
     def generator_wrapper(gen):
         for iter_gen in gen:
@@ -87,19 +87,17 @@ def data_generators(batch_size, img_dim):
 
 
 def create_model(img_dim):
-    #backbone = keras.applications.nasnet.NASNetLarge(input_shape=(*img_dim, 1), include_top=False, weights=None,
-    backbone =  NASNetLarge(input_shape=(*img_dim, 1),
-                dropout=0.5,
-                weight_decay=5e-5,
-                use_auxiliary_branch=True,
-                include_top=True,
-                weights=None,
-                input_tensor=None,
-                pooling=None,
-                classes=14,
-                activation='sigmoid')
-
-
+    # backbone = keras.applications.nasnet.NASNetLarge(input_shape=(*img_dim, 1), include_top=False, weights=None,
+    backbone = NASNetLarge(input_shape=(*img_dim, 1),
+                           dropout=0.5,
+                           weight_decay=5e-5,
+                           use_auxiliary_branch=True,
+                           include_top=True,
+                           weights=None,
+                           input_tensor=None,
+                           pooling=None,
+                           classes=14,
+                           activation='sigmoid')
 
     # weights_path = keras.utils.get_file(
     #     'nasnet_large_no_top.h5',
@@ -116,19 +114,16 @@ def classifier(model):
     clsfr = keras.Model(model.input, x)
     return clsfr
 
+
 # set initial_epoch to last successful epoch
-def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch=10, load_saved_model=True):
+def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch=10):
     filepath = './output/model_durchlauf2_LARGE.{epoch:02d}-{val_loss:.2f}.h5'
     checkpoint = keras.callbacks.ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=False,
                                                  mode='min')
     logdir = "./logs/scalars/"  # /scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_callback = keras.callbacks.TensorBoard(log_dir=logdir)
-    tensorboard_callback.samples_seen = initial_epoch #* len(train_gen)
+    tensorboard_callback.samples_seen = initial_epoch  # * len(train_gen)
     tensorboard_callback.samples_seen_at_last_write = tensorboard_callback.samples_seen
-
-    if load_saved_model:
-        print("Loading model savepoint")
-        model = load_model(MODEL_CHECKPOINT ,custom_objects={'auc_roc': auc_roc})
 
     model.compile(keras.optimizers.Nadam(lr=1e-4, beta_1=0.9, beta_2=0.999), loss='binary_crossentropy',
                   metrics=['acc', auc_roc],
@@ -142,13 +137,16 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
                         callbacks=[tensorboard_callback, checkpoint, ])
 
 
-def main(tpu_training=False, batch_size=8, img_dim=(331, 331), epochs=40):
+def main(tpu_training=False, batch_size=8, img_dim=(331, 331), epochs=40, load_saved_model=True):
     # pre-instantiations
     train_gen, val_gen, train_size, val_size = data_generators(batch_size, img_dim)
-    # ...weil synthetische regularisierungsmaßnahme
-    #model = classifier(create_model(img_dim))
-    model = create_model(img_dim)
-
+    if load_saved_model:
+        print("Loading model savepoint")
+        model = load_model(MODEL_CHECKPOINT, custom_objects={'auc_roc': auc_roc})
+    else:
+        # ...weil synthetische regularisierungsmaßnahme
+        # model = classifier(create_model(img_dim))
+        model = create_model(img_dim)
 
     # ONLY REQUIRED for training with TPU
     if tpu_training:
@@ -163,4 +161,3 @@ def main(tpu_training=False, batch_size=8, img_dim=(331, 331), epochs=40):
 
 if __name__ == '__main__':
     main()
-
