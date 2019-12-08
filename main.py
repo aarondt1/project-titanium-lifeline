@@ -15,6 +15,11 @@ import keras
 import keras_applications
 from metrics import auc_roc
 from keras import backend as K
+from keras.models import load_model
+from keras_contrib.applications.nasnet import NASNetLarge
+
+
+MODEL_CHECKPOINT = "./output/model_durchlauf2_LARGE.02-0.44.h5"
 
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
@@ -33,14 +38,20 @@ df_val = pd.read_csv('CheXpert-v1.0-small/valid.csv')  # [:500]
 
 
 def data_generators(batch_size, img_dim):
-    img_data_gen = keras.preprocessing.image.ImageDataGenerator(  # rotation_range=7,
-        width_shift_range=0.04,
-        height_shift_range=0.04,
-        shear_range=0.05,
+    img_data_gen = keras.preprocessing.image.ImageDataGenerator(
+        rotation_range=15,
+        width_shift_range=0.08,
+        height_shift_range=0.08,
+        shear_range=7,
         zoom_range=0.08,
         horizontal_flip=True,
         vertical_flip=False,
         rescale=1 / 255)
+    # GENIUS
+    def generator_wrapper(gen):
+        for iter_gen in gen:
+            yield iter_gen[0], [iter_gen[1], iter_gen[1]]
+
     train_gen = img_data_gen.flow_from_dataframe(df_train,
                                                  directory=None,
                                                  x_col='Path',
@@ -71,18 +82,31 @@ def data_generators(batch_size, img_dim):
                                                batch_size=batch_size,
                                                shuffle=True,
                                                interpolation='box')
-    return train_gen, val_gen
+
+    return generator_wrapper(train_gen), generator_wrapper(val_gen), len(train_gen), len(val_gen)
 
 
 def create_model(img_dim):
-    backbone = keras.applications.nasnet.NASNetLarge(input_shape=(*img_dim, 1), include_top=False, weights=None,
-                                                      pooling=None)
-    weights_path = keras.utils.get_file(
-        'nasnet_mobile_no_top.h5',
-        keras_applications.nasnet.NASNET_MOBILE_WEIGHT_PATH_NO_TOP,
-        cache_subdir='models',
-        file_hash='1ed92395b5b598bdda52abe5c0dbfd63')
-    backbone.load_weights(weights_path, by_name=True, skip_mismatch=True)
+    #backbone = keras.applications.nasnet.NASNetLarge(input_shape=(*img_dim, 1), include_top=False, weights=None,
+    backbone =  NASNetLarge(input_shape=(*img_dim, 1),
+                dropout=0.5,
+                weight_decay=5e-5,
+                use_auxiliary_branch=True,
+                include_top=True,
+                weights=None,
+                input_tensor=None,
+                pooling=None,
+                classes=14,
+                activation='sigmoid')
+
+
+
+    # weights_path = keras.utils.get_file(
+    #     'nasnet_large_no_top.h5',
+    #     keras_applications.nasnet.NASNET_LARGE_WEIGHT_PATH_NO_TOP,
+    #     cache_subdir='models',
+    #     file_hash='d81d89dc07e6e56530c4e77faddd61b5')
+    backbone.load_weights(MODEL_CHECKPOINT, by_name=True, skip_mismatch=True)
     return backbone
 
 
@@ -92,29 +116,39 @@ def classifier(model):
     clsfr = keras.Model(model.input, x)
     return clsfr
 
-
-def train(model, epochs, train_gen, val_gen):
-    filepath = './output/model_durchlauf1_LARGE.{epoch:02d}-{val_loss:.2f}.h5'
+# set initial_epoch to last successful epoch
+def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch=10, load_saved_model=True):
+    filepath = './output/model_durchlauf2_LARGE.{epoch:02d}-{val_loss:.2f}.h5'
     checkpoint = keras.callbacks.ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=False,
                                                  mode='min')
     logdir = "./logs/scalars/"  # /scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_callback = keras.callbacks.TensorBoard(log_dir=logdir)
+    tensorboard_callback.samples_seen = initial_epoch #* len(train_gen)
+    tensorboard_callback.samples_seen_at_last_write = tensorboard_callback.samples_seen
 
+    if load_saved_model:
+        print("Loading model savepoint")
+        model = load_model(MODEL_CHECKPOINT ,custom_objects={'auc_roc': auc_roc})
+
+    model.compile(keras.optimizers.Nadam(lr=1e-4, beta_1=0.9, beta_2=0.999), loss='binary_crossentropy',
+                  metrics=['acc', auc_roc],
+                  loss_weights=[1, 0.4])
     model.fit_generator(train_gen,
-                        steps_per_epoch=len(train_gen),
+                        steps_per_epoch=train_size,
                         epochs=epochs,
                         validation_data=val_gen,
-                        validation_steps=len(val_gen),
-                        initial_epoch=0,
-                        callbacks=[tensorboard_callback, checkpoint])
+                        validation_steps=val_size,
+                        initial_epoch=initial_epoch,
+                        callbacks=[tensorboard_callback, checkpoint, ])
 
 
-def main(tpu_training=False, batch_size=16, img_dim=(331, 331), epochs=40):
+def main(tpu_training=False, batch_size=8, img_dim=(331, 331), epochs=40):
     # pre-instantiations
-    train_gen, val_gen = data_generators(batch_size, img_dim)
-    model = classifier(create_model(img_dim))
-    model.compile(keras.optimizers.SGD(lr=1e-3, momentum=0.9, nesterov=True), loss='binary_crossentropy',
-                  metrics=['acc', auc_roc])
+    train_gen, val_gen, train_size, val_size = data_generators(batch_size, img_dim)
+    # ...weil synthetische regularisierungsmaßnahme
+    #model = classifier(create_model(img_dim))
+    model = create_model(img_dim)
+
 
     # ONLY REQUIRED for training with TPU
     if tpu_training:
@@ -124,7 +158,7 @@ def main(tpu_training=False, batch_size=16, img_dim=(331, 331), epochs=40):
                 tf.contrib.cluster_resolver.TPUClusterResolver(TPU_WORKER)))
 
     # training
-    train(model, epochs, train_gen, val_gen)
+    train(model, epochs, train_gen, val_gen, train_size, val_size)
 
 
 if __name__ == '__main__':
