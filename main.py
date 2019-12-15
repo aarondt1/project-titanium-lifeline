@@ -16,13 +16,13 @@ import keras_applications
 from metrics import auc_roc
 from keras import backend as K
 from keras.models import load_model
-from keras_contrib.applications.nasnet import NASNetLarge
+from keras_contrib.applications.nasnet import NASNetLarge, NASNET_LARGE_WEIGHT_PATH_WITH_auxiliary
+from keras.utils import multi_gpu_model
 
-MODEL_CHECKPOINT = "./output/model_durchlauf2_LARGE.10-1.33.h5"
+MODEL_CHECKPOINT = "./output/model_durchlauf2_LARGE.15-0.44.h5"
 
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
-config.gpu_options.per_process_gpu_memory_fraction = 0.95
 # config.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
 K.tensorflow_backend.set_session(tf.Session(config=config))
 
@@ -34,6 +34,12 @@ df_train = df_train.where(df_train != -1.0, ran)
 
 # no post-processing necessary due to the intended lack of uncertainty labels / nans
 df_val = pd.read_csv('CheXpert-v1.0-small/valid.csv')  # [:500]
+
+
+class CondBCE(keras.losses.Loss):
+    def call(self, y_true, y_pred):  # (bs, classes)
+        y_true = K.cast(y_true, y_pred.dtype)
+        return K.mean(K.binary_crossentropy(y_true[:, :-1], y_pred[:, :-1], from_logits=False) * K.round(y_true[:, -1, None]), axis=-1)
 
 
 def data_generators(batch_size, img_dim):
@@ -49,8 +55,24 @@ def data_generators(batch_size, img_dim):
 
     # GENIUS
     def generator_wrapper(gen):
+        def cond(labels, indicies, mother, neg):
+            siblings = labels[:, [*indicies, *mother]]
+            siblings[:, -len(mother):] = np.where(neg, np.nan_to_num(siblings[:, -len(mother):])
+                                                  < 0.5, np.isfinite(siblings[:, -len(mother):])).astype(float)
+            # return siblings
+            return np.hstack(
+                [siblings[:, :-len(mother)], np.product(siblings[:, -len(mother):], axis=1, keepdims=True)])
+
         for iter_gen in gen:
-            yield iter_gen[0], [iter_gen[1], iter_gen[1]]
+            labels = iter_gen[1]
+
+            head = cond(labels, [0, 13], [True], [False])
+            top = cond(labels, [1, 3, 4, 9 or 10 or 11, 12], [0], [True])
+            cardio = cond(labels, [2], [0, 1], [True, False])
+            lung = cond(labels, [4, 5, 6, 7, 8], [0, 3], [True, False])
+            pleural = cond(labels, [9, 10, 11], [0], [True])
+
+            yield iter_gen[0], [iter_gen[1], head, top, cardio, lung, pleural]
 
     train_gen = img_data_gen.flow_from_dataframe(df_train,
                                                  directory=None,
@@ -99,25 +121,30 @@ def create_model(img_dim):
                            classes=14,
                            activation='sigmoid')
 
-    # weights_path = keras.utils.get_file(
-    #     'nasnet_large_no_top.h5',
-    #     keras_applications.nasnet.NASNET_LARGE_WEIGHT_PATH_NO_TOP,
-    #     cache_subdir='models',
-    #     file_hash='d81d89dc07e6e56530c4e77faddd61b5')
-    backbone.load_weights(MODEL_CHECKPOINT, by_name=True, skip_mismatch=True)
-    return backbone
+    weights_path = keras.utils.get_file(
+        'nasnet_large_with_aux.h5',
+        NASNET_LARGE_WEIGHT_PATH_WITH_auxiliary,
+        cache_subdir='models')
+    backbone.load_weights(weights_path, by_name=True, skip_mismatch=True)
+    # backbone.load_weights(MODEL_CHECKPOINT, by_name=True, skip_mismatch=True)
+    return classifier(backbone)
 
 
-def classifier(model):
-    x = keras.layers.GlobalAveragePooling2D()(model.output)
-    x = keras.layers.Dense(14, activation='sigmoid')(x)
-    clsfr = keras.Model(model.input, x)
+def classifier(model, weight_decay=5e-5):
+    x = model.get_layer('dropout_1').output
+    head = keras.layers.Dense(3, kernel_regularizer=keras.regularizers.l2(weight_decay), activation='sigmoid', name='head')(x)
+    top = keras.layers.Dense(6, kernel_regularizer=keras.regularizers.l2(weight_decay), activation='sigmoid', name='top')(x)
+    cardio = keras.layers.Dense(2, kernel_regularizer=keras.regularizers.l2(weight_decay), activation='sigmoid', name='cardio')(x)
+    lung = keras.layers.Dense(6, kernel_regularizer=keras.regularizers.l2(weight_decay), activation='sigmoid', name='lung')(x)
+    pleural = keras.layers.Dense(4, kernel_regularizer=keras.regularizers.l2(weight_decay), activation='sigmoid', name='pleural')(x)
+
+    clsfr = keras.Model(model.input, [model.output[1], head, top, cardio, lung, pleural])
     return clsfr
 
 
 # set initial_epoch to last successful epoch
-def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch=10):
-    filepath = './output/model_durchlauf2_LARGE.{epoch:02d}-{val_loss:.2f}.h5'
+def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch=0):
+    filepath = './output/model_cond_LARGE.{epoch:02d}-{val_loss:.2f}.h5'
     checkpoint = keras.callbacks.ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=False,
                                                  mode='min')
     logdir = "./logs/scalars/"  # /scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -125,9 +152,10 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
     tensorboard_callback.samples_seen = initial_epoch  # * len(train_gen)
     tensorboard_callback.samples_seen_at_last_write = tensorboard_callback.samples_seen
 
-    model.compile(keras.optimizers.Nadam(lr=1e-4, beta_1=0.9, beta_2=0.999), loss='binary_crossentropy',
+    model.compile(keras.optimizers.Nadam(lr=4e-5, beta_1=0.9, beta_2=0.999),
+                  loss=['binary_crossentropy', CondBCE(), CondBCE(), CondBCE(), CondBCE(), CondBCE()],
                   metrics=['acc', auc_roc],
-                  loss_weights=[1, 0.4])
+                  loss_weights=[0.4, 1, 1, 1, 1, 1])
     model.fit_generator(train_gen,
                         steps_per_epoch=train_size,
                         epochs=epochs,
@@ -137,7 +165,7 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
                         callbacks=[tensorboard_callback, checkpoint, ])
 
 
-def main(tpu_training=False, batch_size=8, img_dim=(331, 331), epochs=40, load_saved_model=True):
+def main(batch_size=8, img_dim=(331, 331), epochs=40, load_saved_model=False):
     # pre-instantiations
     train_gen, val_gen, train_size, val_size = data_generators(batch_size, img_dim)
     if load_saved_model:
@@ -148,12 +176,8 @@ def main(tpu_training=False, batch_size=8, img_dim=(331, 331), epochs=40, load_s
         # model = classifier(create_model(img_dim))
         model = create_model(img_dim)
 
-    # ONLY REQUIRED for training with TPU
-    if tpu_training:
-        model = tf.contrib.tpu.keras_to_tpu_model(
-            model,
-            strategy=tf.contrib.tpu.TPUDistributionStrategy(
-                tf.contrib.cluster_resolver.TPUClusterResolver(TPU_WORKER)))
+    # multi GPU case :))
+    # model = multi_gpu_model(model)
 
     # training
     train(model, epochs, train_gen, val_gen, train_size, val_size)
