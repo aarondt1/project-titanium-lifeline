@@ -177,7 +177,7 @@ def main(batch_size=8, img_dim=(331, 331), epochs=40, load_saved_model=False):
     train_gen, val_gen, train_size, val_size = data_generators(batch_size, img_dim)
     if load_saved_model:
         print("Loading model savepoint")
-        model = load_model(MODEL_CHECKPOINT, custom_objects={'auc_roc': auc_roc})
+        model = load_model(MODEL_CHECKPOINT, custom_objects={'auc_roc': auc_roc, 'accuracy': accuracy, 'CondBCE': CondBCE()})
     else:
         # ...weil synthetische regularisierungsmaßnahme
         # model = classifier(create_model(img_dim))
