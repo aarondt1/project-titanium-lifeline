@@ -141,6 +141,13 @@ def classifier(model, weight_decay=5e-5):
     clsfr = keras.Model(model.input, [model.output[1], head, top, cardio, lung, pleural])
     return clsfr
 
+def accuracy(y_true, y_pred):
+    y_true = y_true[:, :-1]
+    y_pred = y_pred[:, :-1]
+    if not K.is_tensor(y_pred):
+        y_pred = K.constant(y_pred)
+    y_true = K.cast(y_true, y_pred.dtype)
+    return K.cast(K.equal(y_true, y_pred), K.floatx())
 
 # set initial_epoch to last successful epoch
 def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch=0):
@@ -154,7 +161,7 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
 
     model.compile(keras.optimizers.Nadam(lr=4e-5, beta_1=0.9, beta_2=0.999),
                   loss=['binary_crossentropy', CondBCE(), CondBCE(), CondBCE(), CondBCE(), CondBCE()],
-                  metrics=['acc', auc_roc],
+                  metrics=[accuracy, auc_roc],
                   loss_weights=[0.4, 1, 1, 1, 1, 1])
     model.fit_generator(train_gen,
                         steps_per_epoch=train_size,
