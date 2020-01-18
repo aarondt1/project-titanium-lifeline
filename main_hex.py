@@ -80,6 +80,7 @@ def generate_all_possible_combinations(df, n=14):  # reduced valid combs from 16
 
 combs, df_train = generate_all_possible_combinations(df_train)
 df_train = df_train.fillna(-1)
+df_train = df_train.loc[(df_train.iloc[:, 5:] != -1).any(axis=1)]  # 2560 rows
 
 
 class HEXLoss(keras.losses.Loss):
@@ -89,20 +90,27 @@ class HEXLoss(keras.losses.Loss):
 
     def call(self, y_true, y_pred):  # (bs, classes)
         y_true = K.reshape(K.cast(y_true, y_pred.dtype), (-1, y_pred.shape[1]))
-
-        yp = K.prod(y_true*y_pred + (1-y_true)*(1-y_pred), axis=1)
+        yp = tf.zeros_like(y_pred[:, 0])
 
         def for_each_batch(args):
             y_true, y_pred, yp = args
 
-            certain_combs = K.cast(tf.numpy_function(lambda x: np.unique(self.comb[:, x != -1], axis=0), [y_true], tf.int32), tf.float32)
             y_pred_ = y_pred[tf.not_equal(y_true, -1)]
-            yp /= K.sum(K.prod(y_pred_*tf.transpose(certain_combs), axis=0) + K.prod((1-y_pred_)*tf.transpose(1-certain_combs), axis=0))
+            y_true_ = y_true[tf.not_equal(y_true, -1)]
+            # y_pred_ = tf.Print(y_pred_, [y_pred_], 'ypred: ')
+            # y_true_ = tf.Print(y_true_, [y_true_], 'y_true: ')
+            yp = K.sum(K.log(y_true_*y_pred_ + (1-y_true_)*(1-y_pred_)))
+            # yp = tf.Print(yp, [yp], 'yp before: ')
+
+            certain_combs = K.cast(tf.numpy_function(lambda x: np.unique(x, axis=0), [tf.boolean_mask(combs, tf.not_equal(y_true, -1), axis=1)], tf.int64), tf.float32)
+            # certain_combs = tf.Print(certain_combs, [certain_combs], 'Combs ')
+            yp /= K.logsumexp(K.sum(y_pred_*certain_combs, axis=1) + K.sum((1-y_pred_)*(1-certain_combs), axis=1))
             return yp
 
         yp = tf.map_fn(for_each_batch, (y_true, y_pred, yp), dtype=tf.float32)
+        # yp = tf.Print(yp, [yp], 'yp after: ')
 
-        return -K.log(yp)
+        return -yp
 
 
 def data_generators(batch_size, img_dim):
@@ -157,7 +165,7 @@ def data_generators(batch_size, img_dim):
 
 def create_model(img_dim):
     # backbone = keras.applications.nasnet.NASNetLarge(input_shape=(*img_dim, 1), include_top=False, weights=None,
-    backbone = NASNetMobile(input_shape=(*img_dim, 1),
+    backbone = NASNetLarge(input_shape=(*img_dim, 1),
                             dropout=0.5,
                             weight_decay=5e-5,
                             use_auxiliary_branch=True,
@@ -169,8 +177,8 @@ def create_model(img_dim):
                             activation='sigmoid')
 
     weights_path = keras.utils.get_file(
-        'nasnet_mobile_with_aux.h5',
-        NASNET_MOBILE_WEIGHT_PATH_WITH_AUXULARY,
+        'nasnet_large_with_aux.h5',
+        NASNET_LARGE_WEIGHT_PATH_WITH_auxiliary,
         cache_subdir='models')
     backbone.load_weights(weights_path, by_name=True, skip_mismatch=True)
     # backbone.load_weights(MODEL_CHECKPOINT, by_name=True, skip_mismatch=True)
@@ -195,7 +203,7 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
     tensorboard_callback.samples_seen = initial_epoch  # * len(train_gen)
     tensorboard_callback.samples_seen_at_last_write = tensorboard_callback.samples_seen
 
-    model.compile(keras.optimizers.Nadam(lr=4e-5, beta_1=0.9, beta_2=0.999),
+    model.compile(keras.optimizers.Nadam(lr=1e-4, beta_1=0.9, beta_2=0.999),
                   loss=HEXLoss(),
                   metrics=[accuracy, auc_roc],
                   loss_weights=[0.4, 1])
@@ -208,7 +216,7 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
                         callbacks=[tensorboard_callback, checkpoint, ])
 
 
-def main(batch_size=32, img_dim=(331, 331), epochs=40, load_saved_model=False):
+def main(batch_size=8, img_dim=(331, 331), epochs=40, load_saved_model=False):
     # pre-instantiations
     train_gen, val_gen, train_size, val_size = data_generators(batch_size, img_dim)
     if load_saved_model:
