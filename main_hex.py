@@ -13,7 +13,7 @@ import tensorflow as tf
 #tf.get_logger().setLevel(logging.ERROR)
 import keras
 import keras_applications
-from metrics import auc_roc
+from metrics import auc_roc, acc
 from keras import backend as K
 from keras.models import load_model
 from keras_contrib.applications.nasnet import NASNetLarge, NASNetMobile, NASNET_LARGE_WEIGHT_PATH_WITH_auxiliary, NASNET_MOBILE_WEIGHT_PATH_WITH_AUXULARY
@@ -94,8 +94,8 @@ class HEXLoss(keras.losses.Loss):
         def for_each_batch(args):
             y_true, y_pred = args
 
-            y_pred_ = y_pred[tf.not_equal(y_true, -1)]
-            y_true_ = y_true[tf.not_equal(y_true, -1)]
+            y_pred_ = tf.boolean_mask(y_pred, tf.not_equal(y_true, -1))
+            y_true_ = tf.boolean_mask(y_true, tf.not_equal(y_true, -1))
             # y_pred_ = tf.Print(y_pred_, [y_pred_], 'ypred: ')
             # y_true_ = tf.Print(y_true_, [y_true_], 'y_true: ')
             yp = K.sum(K.log(y_true_*y_pred_ + (1-y_true_)*(1-y_pred_)))
@@ -196,7 +196,7 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
 
     model.compile(keras.optimizers.Nadam(lr=1e-4, beta_1=0.9, beta_2=0.999),
                   loss=HEXLoss(),
-                  metrics=['acc', auc_roc],
+                  metrics=[acc, auc_roc],
                   loss_weights=[0.4, 1])
     model.fit_generator(train_gen,
                         steps_per_epoch=train_size,

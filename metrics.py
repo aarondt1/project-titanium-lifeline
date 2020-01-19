@@ -3,6 +3,7 @@ import tensorflow as tf
 # define roc_callback, inspired by https://github.com/keras-team/keras/issues/6050#issuecomment-329996505
 def auc_roc(y_true, y_pred):
     # any tensorflow metric
+    y_true = tf.maximum(y_true, 0.0)
     value, update_op = tf.contrib.metrics.streaming_auc(y_pred, y_true)
 
     # find all variables created for this metric
@@ -17,3 +18,11 @@ def auc_roc(y_true, y_pred):
     with tf.control_dependencies([update_op]):
         value = tf.identity(value)
         return value
+
+
+def acc(y_true, y_pred):
+    y_true = tf.maximum(y_true, 0.0)
+    if not tf.is_tensor(y_pred):
+        y_pred = tf.constant(y_pred)
+    y_true = tf.cast(y_true, y_pred.dtype)
+    return tf.cast(tf.equal(y_true, y_pred), tf.keras.backend.floatx())
