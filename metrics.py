@@ -3,8 +3,6 @@ import tensorflow as tf
 # define roc_callback, inspired by https://github.com/keras-team/keras/issues/6050#issuecomment-329996505
 def auc_roc(y_true, y_pred):
     # any tensorflow metric
-    y_true = y_true[:, :-1]
-    y_pred = y_pred[:, :-1]
     value, update_op = tf.contrib.metrics.streaming_auc(y_pred, y_true)
 
     # find all variables created for this metric

@@ -90,10 +90,9 @@ class HEXLoss(keras.losses.Loss):
 
     def call(self, y_true, y_pred):  # (bs, classes)
         y_true = K.reshape(K.cast(y_true, y_pred.dtype), (-1, y_pred.shape[1]))
-        yp = tf.zeros_like(y_pred[:, 0])
 
         def for_each_batch(args):
-            y_true, y_pred, yp = args
+            y_true, y_pred = args
 
             y_pred_ = y_pred[tf.not_equal(y_true, -1)]
             y_true_ = y_true[tf.not_equal(y_true, -1)]
@@ -104,10 +103,10 @@ class HEXLoss(keras.losses.Loss):
 
             certain_combs = K.cast(tf.numpy_function(lambda x: np.unique(x, axis=0), [tf.boolean_mask(combs, tf.not_equal(y_true, -1), axis=1)], tf.int64), tf.float32)
             # certain_combs = tf.Print(certain_combs, [certain_combs], 'Combs ')
-            yp /= K.logsumexp(K.sum(y_pred_*certain_combs, axis=1) + K.sum((1-y_pred_)*(1-certain_combs), axis=1))
+            yp -= K.logsumexp(K.sum(K.log(y_pred_*certain_combs + (1-y_pred_)*(1-certain_combs)), axis=1))
             return yp
 
-        yp = tf.map_fn(for_each_batch, (y_true, y_pred, yp), dtype=tf.float32)
+        yp = tf.map_fn(for_each_batch, (y_true, y_pred), dtype=tf.float32)
         # yp = tf.Print(yp, [yp], 'yp after: ')
 
         return -yp
@@ -165,7 +164,7 @@ def data_generators(batch_size, img_dim):
 
 def create_model(img_dim):
     # backbone = keras.applications.nasnet.NASNetLarge(input_shape=(*img_dim, 1), include_top=False, weights=None,
-    backbone = NASNetLarge(input_shape=(*img_dim, 1),
+    backbone = NASNetMobile(input_shape=(*img_dim, 1),
                             dropout=0.5,
                             weight_decay=5e-5,
                             use_auxiliary_branch=True,
@@ -177,21 +176,13 @@ def create_model(img_dim):
                             activation='sigmoid')
 
     weights_path = keras.utils.get_file(
-        'nasnet_large_with_aux.h5',
-        NASNET_LARGE_WEIGHT_PATH_WITH_auxiliary,
+        'nasnet_mobile_with_aux.h5',
+        NASNET_MOBILE_WEIGHT_PATH_WITH_AUXULARY,
         cache_subdir='models')
     backbone.load_weights(weights_path, by_name=True, skip_mismatch=True)
     # backbone.load_weights(MODEL_CHECKPOINT, by_name=True, skip_mismatch=True)
     return backbone
 
-
-def accuracy(y_true, y_pred):
-    y_true = y_true[:, :-1]
-    y_pred = y_pred[:, :-1]
-    if not K.is_tensor(y_pred):
-        y_pred = K.constant(y_pred)
-    y_true = K.cast(y_true, y_pred.dtype)
-    return K.cast(K.equal(y_true, y_pred), K.floatx())
 
 # set initial_epoch to last successful epoch
 def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch=0):
@@ -205,7 +196,7 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
 
     model.compile(keras.optimizers.Nadam(lr=1e-4, beta_1=0.9, beta_2=0.999),
                   loss=HEXLoss(),
-                  metrics=[accuracy, auc_roc],
+                  metrics=['acc', auc_roc],
                   loss_weights=[0.4, 1])
     model.fit_generator(train_gen,
                         steps_per_epoch=train_size,
@@ -216,12 +207,12 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
                         callbacks=[tensorboard_callback, checkpoint, ])
 
 
-def main(batch_size=8, img_dim=(331, 331), epochs=40, load_saved_model=False):
+def main(batch_size=32, img_dim=(224, 224), epochs=40, load_saved_model=False):
     # pre-instantiations
     train_gen, val_gen, train_size, val_size = data_generators(batch_size, img_dim)
     if load_saved_model:
         print("Loading model savepoint")
-        model = load_model(MODEL_CHECKPOINT, custom_objects={'auc_roc': auc_roc, 'accuracy': accuracy})
+        model = load_model(MODEL_CHECKPOINT, custom_objects={'auc_roc': auc_roc})
     else:
         # ...weil synthetische regularisierungsmaßnahme
         # model = classifier(create_model(img_dim))
