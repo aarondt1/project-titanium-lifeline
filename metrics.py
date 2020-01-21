@@ -22,7 +22,5 @@ def auc_roc(y_true, y_pred):
 
 def acc(y_true, y_pred):
     y_true = tf.maximum(y_true, 0.0)
-    if not tf.is_tensor(y_pred):
-        y_pred = tf.constant(y_pred)
     y_true = tf.cast(y_true, y_pred.dtype)
-    return tf.cast(tf.equal(y_true, y_pred), tf.keras.backend.floatx())
+    return tf.cast(tf.equal(y_true, tf.cast(y_pred >= 0.5, tf.float32)), tf.keras.backend.floatx())

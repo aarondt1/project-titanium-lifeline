@@ -19,6 +19,7 @@ from keras.models import load_model
 from keras_contrib.applications.nasnet import NASNetLarge, NASNetMobile, NASNET_LARGE_WEIGHT_PATH_WITH_auxiliary, NASNET_MOBILE_WEIGHT_PATH_WITH_AUXULARY
 from keras.utils import multi_gpu_model
 import itertools
+from keras.applications.mobilenet_v2 import MobileNetV2
 
 MODEL_CHECKPOINT = "./output/model_durchlauf2_LARGE.15-0.44.h5"
 
@@ -39,6 +40,7 @@ df_val = pd.read_csv('CheXpert-v1.0-small/valid.csv')
 
 def generate_all_possible_combinations(df, n=14):  # reduced valid combs from 16,384 to 2,402
     comb = np.array(list(itertools.product([0, 1], repeat=n)))
+    comb = comb[2:]  # all zeros (excl. SupportDevices) are invalid as well
 
     # exclusion: no_finding
     for i in range(1, 13):
@@ -81,12 +83,13 @@ def generate_all_possible_combinations(df, n=14):  # reduced valid combs from 16
 combs, df_train = generate_all_possible_combinations(df_train)
 df_train = df_train.fillna(-1)
 df_train = df_train.loc[(df_train.iloc[:, 5:] != -1).any(axis=1)]  # 2560 rows
+# df_train = df_train[:10000]
 
 
 class HEXLoss(keras.losses.Loss):
     def __init__(self):
         super(HEXLoss, self).__init__()
-        self.comb = tf.convert_to_tensor(combs)
+        self.comb = tf.convert_to_tensor(combs, tf.float32)
 
     def call(self, y_true, y_pred):  # (bs, classes)
         y_true = K.reshape(K.cast(y_true, y_pred.dtype), (-1, y_pred.shape[1]))
@@ -96,14 +99,13 @@ class HEXLoss(keras.losses.Loss):
 
             y_pred_ = tf.boolean_mask(y_pred, tf.not_equal(y_true, -1))
             y_true_ = tf.boolean_mask(y_true, tf.not_equal(y_true, -1))
-            # y_pred_ = tf.Print(y_pred_, [y_pred_], 'ypred: ')
-            # y_true_ = tf.Print(y_true_, [y_true_], 'y_true: ')
-            yp = K.sum(K.log(y_true_*y_pred_ + (1-y_true_)*(1-y_pred_)))
-            # yp = tf.Print(yp, [yp], 'yp before: ')
+            # yp = K.sum(K.log(y_true_*y_pred_ + (1-y_true_)*(1-y_pred_)))
+            yp = K.sum(-K.binary_crossentropy(y_true_, y_pred_))
 
-            certain_combs = K.cast(tf.numpy_function(lambda x: np.unique(x, axis=0), [tf.boolean_mask(combs, tf.not_equal(y_true, -1), axis=1)], tf.int64), tf.float32)
+            certain_combs = tf.numpy_function(lambda x: np.unique(x, axis=0), [tf.boolean_mask(self.comb, tf.not_equal(y_true, -1), axis=1)], tf.float32)
             # certain_combs = tf.Print(certain_combs, [certain_combs], 'Combs ')
-            yp -= K.logsumexp(K.sum(K.log(y_pred_*certain_combs + (1-y_pred_)*(1-certain_combs)), axis=1))
+            # yp -= K.logsumexp(K.sum(K.log(y_pred*self.comb + (1-y_pred)*(1-self.comb)), axis=1))
+            yp -= K.logsumexp(K.sum(-K.binary_crossentropy(certain_combs, y_pred_), axis=1))
             return yp
 
         yp = tf.map_fn(for_each_batch, (y_true, y_pred), dtype=tf.float32)
@@ -126,7 +128,7 @@ def data_generators(batch_size, img_dim):
     # GENIUS
     def generator_wrapper(gen):
         for iter_gen in gen:
-            yield iter_gen[0], [iter_gen[1], iter_gen[1]]
+            yield iter_gen[0], iter_gen[1]  # [iter_gen[1], iter_gen[1]]
 
     train_gen = img_data_gen.flow_from_dataframe(df_train,
                                                  directory=None,
@@ -164,40 +166,49 @@ def data_generators(batch_size, img_dim):
 
 def create_model(img_dim):
     # backbone = keras.applications.nasnet.NASNetLarge(input_shape=(*img_dim, 1), include_top=False, weights=None,
-    backbone = NASNetMobile(input_shape=(*img_dim, 1),
-                            dropout=0.5,
-                            weight_decay=5e-5,
-                            use_auxiliary_branch=True,
-                            include_top=True,
-                            weights=None,
-                            input_tensor=None,
-                            pooling=None,
-                            classes=14,
-                            activation='sigmoid')
+    backbone = MobileNetV2(input_shape=(*img_dim, 1),
+                           # dropout=0.5,
+                           # weight_decay=5e-5,
+                           # use_auxiliary_branch=True,
+                           include_top=False,
+                           weights=None,
+                           input_tensor=None,
+                           pooling='avg',
+                           classes=14,
+                           alpha=1.4,
+                           # activation='sigmoid'
+                           )
+    x = keras.layers.Dropout(0.5, name='dropout')(backbone.output)
+    x = keras.layers.Dense(14, activation='sigmoid', use_bias=True, name='Logits')(x)
 
+    BASE_WEIGHT_PATH = ('https://github.com/JonathanCMitchell/mobilenet_v2_keras/'
+                        'releases/download/v1.1/')
+    MODEL_NAME = 'mobilenet_v2_weights_tf_dim_ordering_tf_kernels_1.4_224_no_top.h5'
     weights_path = keras.utils.get_file(
-        'nasnet_mobile_with_aux.h5',
-        NASNET_MOBILE_WEIGHT_PATH_WITH_AUXULARY,
+        MODEL_NAME,
+        BASE_WEIGHT_PATH + MODEL_NAME,
         cache_subdir='models')
     backbone.load_weights(weights_path, by_name=True, skip_mismatch=True)
-    # backbone.load_weights(MODEL_CHECKPOINT, by_name=True, skip_mismatch=True)
+
+    backbone = keras.models.Model(inputs=backbone.inputs, outputs=x)
+
     return backbone
 
 
 # set initial_epoch to last successful epoch
 def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch=0):
-    filepath = './output/model_cond_LARGE.{epoch:02d}-{val_loss:.2f}.h5'
+    filepath = './output/model_hex_MOBILENET.{epoch:02d}-{val_loss:.2f}.h5'
     checkpoint = keras.callbacks.ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=False,
                                                  mode='min')
-    logdir = "./logs/scalars/"  # /scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    logdir = "./logs/scalars/hex/"  # /scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_callback = keras.callbacks.TensorBoard(log_dir=logdir)
     tensorboard_callback.samples_seen = initial_epoch  # * len(train_gen)
     tensorboard_callback.samples_seen_at_last_write = tensorboard_callback.samples_seen
 
     model.compile(keras.optimizers.Nadam(lr=1e-4, beta_1=0.9, beta_2=0.999),
                   loss=HEXLoss(),
-                  metrics=[acc, auc_roc],
-                  loss_weights=[0.4, 1])
+                  metrics=[acc, auc_roc])
+                  #loss_weights=[1, 0.4])
     model.fit_generator(train_gen,
                         steps_per_epoch=train_size,
                         epochs=epochs,
@@ -207,7 +218,7 @@ def train(model, epochs, train_gen, val_gen, train_size, val_size, initial_epoch
                         callbacks=[tensorboard_callback, checkpoint, ])
 
 
-def main(batch_size=32, img_dim=(224, 224), epochs=40, load_saved_model=False):
+def main(batch_size=64, img_dim=(224, 224), epochs=40, load_saved_model=False):
     # pre-instantiations
     train_gen, val_gen, train_size, val_size = data_generators(batch_size, img_dim)
     if load_saved_model:
