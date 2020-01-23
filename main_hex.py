@@ -97,17 +97,18 @@ class HEXLoss(keras.losses.Loss):
         def for_each_batch(args):
             y_true, y_pred = args
 
-            y_pred_ = tf.boolean_mask(y_pred, tf.not_equal(y_true, -1))
-            y_true_ = tf.boolean_mask(y_true, tf.not_equal(y_true, -1))
-            comb_ = tf.gather(self.comb, tf.where(tf.not_equal(y_true, -1))[:,0], axis=1)
-            y_true_combs = tf.gather(self.comb, tf.where(tf.equal(comb_, y_true_))[:,0])
+            # y_pred_ = tf.boolean_mask(y_pred, tf.not_equal(y_true, -1))
+            # y_true_ = tf.boolean_mask(y_true, tf.not_equal(y_true, -1))
+            match = tf.cast(tf.equal(comb, y_true), tf.float32)
+            num_matches_needed = len(tf.boolean_mask(y_true, tf.not_equal(y_true, -1)))
+            y_true_combs = tf.boolean_mask(comb, K.sum(match, axis=1) == num_matches_needed)
             # yp = K.sum(K.log(y_true_*y_pred_ + (1-y_true_)*(1-y_pred_)))
-            yp = K.logsumexp(K.sum(-K.binary_crossentropy(y_true_combs, y_pred_), axis=1))
+            yp = K.logsumexp(K.sum(-K.binary_crossentropy(y_true_combs, y_pred), axis=1))
 
             # certain_combs = tf.numpy_function(lambda x: np.unique(x, axis=0), [tf.boolean_mask(self.comb, tf.not_equal(y_true, -1), axis=1)], tf.float32)
             # certain_combs = tf.Print(certain_combs, [certain_combs], 'Combs ')
             # yp -= K.logsumexp(K.sum(K.log(y_pred*self.comb + (1-y_pred)*(1-self.comb)), axis=1))
-            yp -= K.logsumexp(K.sum(-K.binary_crossentropy(self.comb, y_pred_), axis=1))
+            yp -= K.logsumexp(K.sum(-K.binary_crossentropy(self.comb, y_pred), axis=1))
             return yp
 
         yp = tf.map_fn(for_each_batch, (y_true, y_pred), dtype=tf.float32)
